@@ -3,60 +3,46 @@ import re
 import requests
 from datetime import datetime, timezone
 
-API_URL = "https://api.dealwork.ai/api/v1/jobs"
+BASE_URL = "https://api.dealwork.ai"
+
+SEARCHES = [
+    "reels",
+    "shorts",
+    "short form video",
+    "instagram video",
+    "tiktok video",
+    "ugc video",
+    "video editor",
+]
 
 MIN_PRICE = 30
 
 VIDEO_WORDS = [
-    "reel", "reels",
-    "short", "shorts",
-    "short-form",
-    "tiktok",
-    "instagram",
-    "youtube",
-    "ugc",
-    "video",
-    "videos",
-    "vertical video",
-    "social media video",
+    "reel", "reels", "short", "shorts",
+    "short-form", "short form",
+    "tiktok", "instagram", "youtube",
+    "ugc", "video", "videos"
 ]
 
-RECURRING_WORDS = [
-    "ongoing",
-    "recurring",
-    "long term",
-    "long-term",
-    "weekly",
-    "monthly",
-    "daily",
-    "multiple videos",
-    "multiple reels",
-    "per week",
-    "per month",
-    "every week",
+REPEAT_WORDS = [
+    "ongoing", "recurring", "long-term",
+    "long term", "weekly", "monthly",
+    "daily", "per week", "per month"
 ]
 
-GOOD_BRIEF_WORDS = [
-    "script",
-    "brief",
-    "reference",
-    "raw footage",
-    "assets",
-    "voiceover",
-    "requirements",
-    "examples",
+BRIEF_WORDS = [
+    "script", "brief", "reference",
+    "raw footage", "assets", "voiceover",
+    "requirements", "examples"
 ]
 
 BAD_WORDS = [
-    "unpaid",
-    "free work",
-    "free sample",
-    "exposure only",
+    "unpaid", "free work", "free sample",
+    "exposure only"
 ]
 
 
-def flatten_text(value):
-    """Turn nested JSON into searchable text."""
+def text(value):
     if value is None:
         return ""
 
@@ -67,238 +53,233 @@ def flatten_text(value):
         return str(value)
 
     if isinstance(value, list):
-        return " ".join(flatten_text(x) for x in value)
+        return " ".join(text(x) for x in value)
 
     if isinstance(value, dict):
-        return " ".join(
-            flatten_text(v)
-            for v in value.values()
-        )
+        return " ".join(text(v) for v in value.values())
 
     return ""
 
 
-def get_jobs():
-    response = requests.get(
-        API_URL,
-        params={
-            "limit": 100
-        },
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "video-job-scanner/1.0"
-        },
-        timeout=30
-    )
+def search_jobs(query):
+    """
+    Try Dealwork's search endpoint.
 
-    response.raise_for_status()
-    data = response.json()
+    We keep this read-only:
+    no bidding, no contracts, no payments.
+    """
 
-    # Dealwork may wrap the list in different keys.
-    if isinstance(data, list):
-        return data
+    endpoints = [
+        f"{BASE_URL}/api/v1/jobs/search",
+        f"{BASE_URL}/api/v1/search/jobs",
+    ]
 
-    if isinstance(data, dict):
-        for key in ["jobs", "data", "items", "results"]:
-            if isinstance(data.get(key), list):
-                return data[key]
+    for endpoint in endpoints:
+
+        try:
+            response = requests.get(
+                endpoint,
+                params={
+                    "q": query,
+                    "limit": 100
+                },
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "video-job-scanner/2.0"
+                },
+                timeout=30
+            )
+
+            if response.status_code != 404:
+                response.raise_for_status()
+
+                data = response.json()
+
+                if isinstance(data, list):
+                    return data
+
+                if isinstance(data, dict):
+                    for key in [
+                        "jobs",
+                        "data",
+                        "items",
+                        "results"
+                    ]:
+                        if isinstance(data.get(key), list):
+                            return data[key]
+
+        except Exception as error:
+            print(
+                f"Search failed for '{query}': {error}"
+            )
 
     return []
 
 
-def find_money(text):
+def money_values(value):
+    s = text(value)
+
     values = []
 
-    # $50 / $50.00
     for match in re.findall(
         r"\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
-        text,
-        flags=re.I
+        s
     ):
-        values.append(float(match.replace(",", "")))
+        values.append(
+            float(match.replace(",", ""))
+        )
 
-    # 50 USD / 50 USDC
     for match in re.findall(
         r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:USD|USDC)",
-        text,
-        flags=re.I
+        s,
+        re.I
     ):
-        values.append(float(match.replace(",", "")))
+        values.append(
+            float(match.replace(",", ""))
+        )
 
     return values
 
 
-def get_budget(job, text):
-    possible_fields = [
-        "budget",
-        "budgetMin",
-        "budgetMax",
-        "price",
-        "amount",
-        "maxBudget",
-    ]
+def analyse(job):
 
-    numbers = []
-
-    for field in possible_fields:
-        value = job.get(field)
-
-        if isinstance(value, (int, float)):
-            numbers.append(float(value))
-
-        elif isinstance(value, str):
-            numbers.extend(find_money(value))
-
-    numbers.extend(find_money(text))
-
-    return max(numbers) if numbers else 0
-
-
-def count_videos(text):
-    patterns = [
-        r"(\d+)\s*(?:videos|reels|shorts)",
-        r"(\d+)\s*(?:video|reel|short)",
-    ]
-
-    numbers = []
-
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            numbers.append(int(match))
-
-    return max(numbers) if numbers else 1
-
-
-def analyse_job(job):
-    text = flatten_text(job).lower()
+    full_text = text(job).lower()
 
     video_hits = [
-        word for word in VIDEO_WORDS
-        if word in text
+        x for x in VIDEO_WORDS
+        if x in full_text
     ]
 
-    recurring_hits = [
-        word for word in RECURRING_WORDS
-        if word in text
+    repeat_hits = [
+        x for x in REPEAT_WORDS
+        if x in full_text
     ]
 
     brief_hits = [
-        word for word in GOOD_BRIEF_WORDS
-        if word in text
+        x for x in BRIEF_WORDS
+        if x in full_text
     ]
 
     bad_hits = [
-        word for word in BAD_WORDS
-        if word in text
+        x for x in BAD_WORDS
+        if x in full_text
     ]
 
-    budget = get_budget(job, text)
-    video_count = count_videos(text)
+    prices = money_values(job)
+
+    budget = max(prices) if prices else 0
 
     score = 0
 
-    # Must actually be video-related.
     if video_hits:
         score += 5
 
-    # Recurring work is very valuable to us.
-    if recurring_hits:
+    if repeat_hits:
         score += 4
 
-    if len(recurring_hits) >= 2:
+    if len(repeat_hits) >= 2:
         score += 2
 
-    # Clear instructions make AI production easier.
     if len(brief_hits) >= 2:
         score += 3
 
-    if len(brief_hits) >= 4:
-        score += 2
-
-    # Minimum target.
     if budget >= MIN_PRICE:
         score += 4
 
-    # Multiple videos.
-    if video_count >= 2:
-        score += 3
-
-    if video_count >= 5:
-        score += 2
-
-    # Remove suspicious/free work.
     if bad_hits:
         score -= 10
 
-    # Require actual video language.
     if not video_hits:
         return None
 
     return {
         "score": score,
         "budget_found": budget,
-        "video_count": video_count,
-        "video_keywords": video_hits[:10],
-        "recurring_keywords": recurring_hits[:10],
-        "brief_keywords": brief_hits[:10],
-        "warning_keywords": bad_hits[:10],
-        "job": job,
+        "video_keywords": video_hits,
+        "repeat_keywords": repeat_hits,
+        "brief_keywords": brief_hits,
+        "warnings": bad_hits,
+        "job": job
     }
 
 
 def main():
-    print("VIDEO JOB SCANNER")
+
+    print("VIDEO JOB SCANNER V2")
     print("=" * 50)
 
-    try:
-        jobs = get_jobs()
-    except Exception as e:
-        print("ERROR:", e)
-        return
+    all_jobs = {}
 
-    print(f"Jobs received: {len(jobs)}")
+    for query in SEARCHES:
+
+        print(f"Searching: {query}")
+
+        jobs = search_jobs(query)
+
+        print(
+            f"  Results: {len(jobs)}"
+        )
+
+        for job in jobs:
+
+            job_id = (
+                job.get("id")
+                or job.get("jobId")
+                or str(job)
+            )
+
+            all_jobs[str(job_id)] = job
+
+    jobs = list(all_jobs.values())
+
     print()
+    print(
+        f"Unique jobs found: {len(jobs)}"
+    )
 
-    results = []
+    analysed = []
 
     for job in jobs:
-        result = analyse_job(job)
 
-        if result is not None:
-            results.append(result)
+        result = analyse(job)
 
-    results.sort(
+        if result:
+            analysed.append(result)
+
+    analysed.sort(
         key=lambda x: (
             x["score"],
-            x["budget_found"],
-            x["video_count"]
+            x["budget_found"]
         ),
         reverse=True
     )
 
-    qualified = []
+    qualified = [
+        x for x in analysed
+        if x["score"] >= 8
+    ]
 
-    for result in results:
+    print(
+        f"Video jobs: {len(analysed)}"
+    )
 
-        # Our first conservative filter.
-        if (
-            result["score"] >= 10
-            and result["budget_found"] >= MIN_PRICE
-        ):
-            qualified.append(result)
+    print(
+        f"Potential matches: {len(qualified)}"
+    )
 
-    print(f"Video-related jobs: {len(results)}")
-    print(f"QUALIFIED JOBS: {len(qualified)}")
     print()
 
-    for index, result in enumerate(qualified[:20], start=1):
+    for i, result in enumerate(
+        qualified[:20],
+        1
+    ):
 
         job = result["job"]
 
         title = (
             job.get("title")
             or job.get("name")
-            or "Untitled job"
+            or "Untitled"
         )
 
         job_id = (
@@ -314,19 +295,28 @@ def main():
         )
 
         print("=" * 50)
-        print(f"#{index} {title}")
+
+        print(f"#{i}")
+        print(f"Title: {title}")
         print(f"ID: {job_id}")
-        print(f"Budget found: ${result['budget_found']}")
-        print(f"Videos detected: {result['video_count']}")
-        print(f"Score: {result['score']}")
-        print(f"URL: {url}")
+        print(
+            f"Budget found: "
+            f"${result['budget_found']}"
+        )
+
+        print(
+            f"Score: {result['score']}"
+        )
+
+        print(
+            f"URL: {url}"
+        )
+
         print(
             "Recurring:",
-            ", ".join(result["recurring_keywords"])
-        )
-        print(
-            "Brief:",
-            ", ".join(result["brief_keywords"])
+            ", ".join(
+                result["repeat_keywords"]
+            )
         )
 
     output = {
@@ -334,29 +324,32 @@ def main():
             timezone.utc
         ).isoformat(),
 
-        "jobs_received": len(jobs),
+        "searches": SEARCHES,
 
-        "video_related": len(results),
+        "jobs_found": len(jobs),
 
-        "qualified": len(qualified),
+        "video_jobs": len(analysed),
 
-        "matches": qualified[:20],
+        "potential_matches": len(qualified),
+
+        "matches": qualified[:20]
     }
 
     with open(
         "matches.json",
         "w",
         encoding="utf-8"
-    ) as file:
+    ) as f:
+
         json.dump(
             output,
-            file,
+            f,
             ensure_ascii=False,
             indent=2
         )
 
     print()
-    print("Saved: matches.json")
+    print("Saved matches.json")
 
 
 if __name__ == "__main__":
